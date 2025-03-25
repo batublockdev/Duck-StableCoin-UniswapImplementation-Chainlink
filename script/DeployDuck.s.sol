@@ -29,7 +29,7 @@ contract DeployDuck is Script {
             address(duckCoin)
         );
         duckCoin.transferOwnership(address(duckEngine));
-        vm.endBroadcast();
+        vm.stopBroadcast();
         return (duckEngine, duckCoin, helperConfig);
     }
 }

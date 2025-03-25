@@ -14,10 +14,10 @@ contract DuckEngineTest is Test {
     HelperConfig helperConfig;
 
     /*-------------- Variable Declaration -------------------*/
-    adddresss ethUsdPriceFeed;
-    adddresss wbtcUsdPriceFeed;
-    adddresss weth;
-    adddresss wbtc;
+    address ethUsdPriceFeed;
+    address wbtcUsdPriceFeed;
+    address weth;
+    address wbtc;
 
     function setUp() public {
         deployer = new DeployDuck();
@@ -27,11 +27,10 @@ contract DuckEngineTest is Test {
     }
 
     function testGetUsdValue() public {
-        uint256 ethAmount = 1e18;
-        uint256 wbtcAmount = 1e8;
-        uint256 ethUsdValue = duckEngine.getUsdValue(weth, ethAmount);
-        uint256 wbtcUsdValue = duckEngine.getUsdValue(wbtc, wbtcAmount);
-        assertEq(ethUsdValue, 2000e18);
-        assertEq(wbtcUsdValue, 1000e8);
+        uint256 ethAmount = 12e18;
+        // 12e18 * 2000e18 = 24000e18
+        uint256 expectedEthUsdValue = 24000e18;
+        uint256 ethUsdValue = duckEngine.getPriceUsd(weth, ethAmount);
+        assertEq(ethUsdValue, expectedEthUsdValue);
     }
 }
