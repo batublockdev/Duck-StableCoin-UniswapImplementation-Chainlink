@@ -69,6 +69,9 @@ contract DuckEngine is ReentrancyGuard {
     error DuckEngine_FaildToTransferCollateral();
     error DuckEngine_BreaksHelthFactor(uint256 healthFactor);
     error DuckEngine_FaildToMint();
+    error DuckEngine_TransferFailed();
+    error DuckEngine_HelthFactorOk(uint256 healthFactor);
+    error DuckEngine_HelthFactorNoImproved();
 
     //////////////////////////////
     /////   Variables       /////
@@ -84,6 +87,7 @@ contract DuckEngine is ReentrancyGuard {
     uint256 private constant PRICE_PRECISION = 1e18;
     uint256 private constant LIQUIDATION_THRESHOLD = 50;
     uint256 private constant LIQUIDATION_PRECITION = 100;
+    uint256 private constant LIQUIDATION_BONUS = 10;
     uint256 private constant MIN_HEALTH_FACTOR = 1;
 
     DuckCoin private immutable i_duckCoin;
@@ -112,6 +116,12 @@ contract DuckEngine is ReentrancyGuard {
         address indexed user,
         address indexed token,
         uint256 indexed amount
+    );
+    event CollateralRedeemed(
+        address indexed from,
+        address indexed to,
+        address indexed token,
+        uint256 amount
     );
 
     //////////////////////////////
@@ -143,6 +153,83 @@ contract DuckEngine is ReentrancyGuard {
      * and to make the system more secure and trustable, checking the health factor
      * and the price of the collateral assets dayly or weekly
      */
+
+    /**
+     *
+     * @param token the address of the token to be used as collateral
+     * @param amountCollateral the amount of the token to be deposited as collateral
+     * @param amounToMint the amount of DuckCoin to be minted
+     */
+    function depositCollateralandMintDuckCoin(
+        address token,
+        uint256 amountCollateral,
+        uint256 amounToMint
+    ) external {
+        depositCollateral(token, amountCollateral);
+        mintDuckCoin(amounToMint);
+    }
+
+    /**
+     *
+     * @param token token address to redeem
+     * @param amountCollateral amount of the token to redeem
+     * @param amounToBurn amount of DuckCoin to burn
+     */
+    function redeemCollateralAndBurnDuckCoin(
+        address token,
+        uint256 amountCollateral,
+        uint256 amounToBurn
+    ) external {
+        burnDuckCoin(amounToBurn);
+        redeemCollateral(token, amountCollateral);
+    }
+
+    function liquidate(
+        address collateral,
+        address user,
+        uint256 debtToCover
+    ) external notZero(debtToCover) nonReentrant {
+        uint256 healthFactor = getHealthFactor(user);
+        if (healthFactor >= MIN_HEALTH_FACTOR) {
+            revert DuckEngine_HelthFactorOk(healthFactor);
+        }
+        uint256 tokenAmountFromDebtCorevered = getTokenAmountFromUsd(
+            collateral,
+            debtToCover
+        );
+        uint256 bonusliquidator = (tokenAmountFromDebtCorevered *
+            LIQUIDATION_BONUS) / LIQUIDATION_PRECITION;
+        uint256 totalAmountToLiquidate = tokenAmountFromDebtCorevered +
+            bonusliquidator;
+        _redeemCollateral(collateral, totalAmountToLiquidate, user, msg.sender);
+        _burnDuck(debtToCover, user, msg.sender);
+        uint256 endingHealthFactor = getHealthFactor(user);
+        if (endingHealthFactor <= healthFactor) {
+            revert DuckEngine_HelthFactorNoImproved();
+        }
+        _revetIfHealthFactorBelowThreshold(msg.sender);
+    }
+
+    function getTokenAmountFromUsd(
+        address token,
+        uint256 amount
+    ) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(
+            collateralPrices[token]
+        );
+        (, int price, , , ) = priceFeed.latestRoundData();
+        return ((amount * PRICE_PRECISION) /
+            (uint256(price) * ADITIONAL_FEED_PRECISION));
+    }
+
+    function redeemCollateral(
+        address token,
+        uint256 amount
+    ) public notZero(amount) isAllowedCollateral(token) nonReentrant {
+        _redeemCollateral(token, amount, msg.sender, msg.sender);
+        _revetIfHealthFactorBelowThreshold(msg.sender);
+    }
+
     /**
      *
      * @param token the address of the token to be used as collateral
@@ -151,7 +238,7 @@ contract DuckEngine is ReentrancyGuard {
     function depositCollateral(
         address token,
         uint256 amount
-    ) external notZero(amount) isAllowedCollateral(token) nonReentrant {
+    ) public notZero(amount) isAllowedCollateral(token) nonReentrant {
         s_user_collateralAssets[msg.sender][token] += amount;
         emit CollateralDeposited(msg.sender, token, amount);
         bool sucess = IERC20(token).transferFrom(
@@ -170,15 +257,18 @@ contract DuckEngine is ReentrancyGuard {
      * @dev to mint DuckCoin, the user must have collateral assets deposited
      */
 
-    function mintDuckCoin(
-        uint256 amount
-    ) external notZero(amount) nonReentrant {
+    function mintDuckCoin(uint256 amount) public notZero(amount) nonReentrant {
         s_duckCoinBalances[msg.sender] += amount;
         _revetIfHealthFactorBelowThreshold(msg.sender);
         bool sucess = i_duckCoin.mint(msg.sender, amount);
         if (!sucess) {
             revert DuckEngine_FaildToMint();
         }
+    }
+
+    function burnDuckCoin(uint256 amount) public notZero(amount) {
+        _burnDuck(amount, msg.sender, msg.sender);
+        _revetIfHealthFactorBelowThreshold(msg.sender);
     }
 
     function _getUserInformation(
@@ -247,5 +337,36 @@ contract DuckEngine is ReentrancyGuard {
             totalCollateralValueInUSD += getPriceUsd(token, amount);
         }
         return totalCollateralValueInUSD;
+    }
+
+    //////////////////////////////
+    /////  PRIVATE FUNCTIONS  /////
+    //////////////////////////////
+
+    function _redeemCollateral(
+        address token,
+        uint256 amount,
+        address from,
+        address to
+    ) private notZero(amount) isAllowedCollateral(token) {
+        s_user_collateralAssets[from][token] -= amount;
+        emit CollateralRedeemed(from, to, token, amount);
+        bool sucess = IERC20(token).transfer(to, amount);
+        if (!sucess) {
+            revert DuckEngine_FaildToTransferCollateral();
+        }
+    }
+
+    function _burnDuck(
+        uint256 amount,
+        address onBehalfOf,
+        address duckFrom
+    ) private notZero(amount) {
+        s_duckCoinBalances[onBehalfOf] -= amount;
+        bool sucess = i_duckCoin.transferFrom(duckFrom, address(this), amount);
+        if (!sucess) {
+            revert DuckEngine_TransferFailed();
+        }
+        i_duckCoin.burn(amount);
     }
 }
