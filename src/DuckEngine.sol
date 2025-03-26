@@ -103,7 +103,7 @@ contract DuckEngine is ReentrancyGuard {
         _;
     }
     modifier isAllowedCollateral(address _collateral) {
-        if (collateralPrices[_collateral] != address(0)) {
+        if (collateralPrices[_collateral] == address(0)) {
             revert DuckEngine_CollateralNotSupported();
         }
         _;
@@ -154,6 +154,10 @@ contract DuckEngine is ReentrancyGuard {
      * and the price of the collateral assets dayly or weekly
      */
 
+    //////////////////////////////
+    /////   EXTERNAL FUNTIONS /////
+    //////////////////////////////
+
     /**
      *
      * @param token the address of the token to be used as collateral
@@ -180,9 +184,39 @@ contract DuckEngine is ReentrancyGuard {
         uint256 amountCollateral,
         uint256 amounToBurn
     ) external {
-        burnDuckCoin(amounToBurn);
-        redeemCollateral(token, amountCollateral);
+        _burnDuck(amounToBurn, msg.sender, msg.sender);
+        _redeemCollateral(token, amountCollateral, msg.sender, msg.sender);
+        _revetIfHealthFactorBelowThreshold(msg.sender);
     }
+
+    /**
+     * @param token the address of the token to be redeemed
+     * @param amount the amount of the token to be redeemed
+     */
+    function redeemCollateral(
+        address token,
+        uint256 amount
+    ) external notZero(amount) isAllowedCollateral(token) nonReentrant {
+        _redeemCollateral(token, amount, msg.sender, msg.sender);
+        _revetIfHealthFactorBelowThreshold(msg.sender);
+    }
+
+    /**
+     * @param amount the amount of DuckCoin to be burned
+     */
+    function burnDuckCoin(uint256 amount) public notZero(amount) {
+        _burnDuck(amount, msg.sender, msg.sender);
+        _revetIfHealthFactorBelowThreshold(msg.sender);
+    }
+
+    /**
+     * @param collateral the address of the token to be luiquidated
+     * @param user the address of the user to be liquidated
+     * @param debtToCover the amount of DuckCoin to be covered
+     *
+     * @notice that the by liquidating the user, the liquidator will get a bonus
+     * of 10% of the debt to cover
+     */
 
     function liquidate(
         address collateral,
@@ -210,24 +244,23 @@ contract DuckEngine is ReentrancyGuard {
         _revetIfHealthFactorBelowThreshold(msg.sender);
     }
 
-    function getTokenAmountFromUsd(
-        address token,
-        uint256 amount
-    ) public view returns (uint256) {
-        AggregatorV3Interface priceFeed = AggregatorV3Interface(
-            collateralPrices[token]
-        );
-        (, int price, , , ) = priceFeed.latestRoundData();
-        return ((amount * PRICE_PRECISION) /
-            (uint256(price) * ADITIONAL_FEED_PRECISION));
-    }
+    //////////////////////////////
+    /////  PUBLIC  FUNTIONS /////
+    //////////////////////////////
 
-    function redeemCollateral(
-        address token,
-        uint256 amount
-    ) public notZero(amount) isAllowedCollateral(token) nonReentrant {
-        _redeemCollateral(token, amount, msg.sender, msg.sender);
+    /**
+     * @notice follows CEI
+     * @param amount the amount of DuckCoin to be minted
+     * @dev to mint DuckCoin, the user must have collateral assets deposited
+     */
+
+    function mintDuckCoin(uint256 amount) public notZero(amount) nonReentrant {
+        s_duckCoinBalances[msg.sender] += amount;
         _revetIfHealthFactorBelowThreshold(msg.sender);
+        bool sucess = i_duckCoin.mint(msg.sender, amount);
+        if (!sucess) {
+            revert DuckEngine_FaildToMint();
+        }
     }
 
     /**
@@ -251,29 +284,52 @@ contract DuckEngine is ReentrancyGuard {
         }
     }
 
-    /**
-     * @notice follows CEI
-     * @param amount the amount of DuckCoin to be minted
-     * @dev to mint DuckCoin, the user must have collateral assets deposited
-     */
+    function getTokenAmountFromUsd(
+        address token,
+        uint256 amount
+    ) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(
+            collateralPrices[token]
+        );
+        (, int price, , , ) = priceFeed.latestRoundData();
+        return ((amount * PRICE_PRECISION) /
+            (uint256(price) * ADITIONAL_FEED_PRECISION));
+    }
 
-    function mintDuckCoin(uint256 amount) public notZero(amount) nonReentrant {
-        s_duckCoinBalances[msg.sender] += amount;
-        _revetIfHealthFactorBelowThreshold(msg.sender);
-        bool sucess = i_duckCoin.mint(msg.sender, amount);
+    //////////////////////////////
+    /////  PRIVATE FUNCTIONS  /////
+    //////////////////////////////
+
+    function _redeemCollateral(
+        address token,
+        uint256 amount,
+        address from,
+        address to
+    ) private notZero(amount) isAllowedCollateral(token) {
+        s_user_collateralAssets[from][token] -= amount;
+        emit CollateralRedeemed(from, to, token, amount);
+        bool sucess = IERC20(token).transfer(to, amount);
         if (!sucess) {
-            revert DuckEngine_FaildToMint();
+            revert DuckEngine_FaildToTransferCollateral();
         }
     }
 
-    function burnDuckCoin(uint256 amount) public notZero(amount) {
-        _burnDuck(amount, msg.sender, msg.sender);
-        _revetIfHealthFactorBelowThreshold(msg.sender);
+    function _burnDuck(
+        uint256 amount,
+        address onBehalfOf,
+        address duckFrom
+    ) private notZero(amount) {
+        s_duckCoinBalances[onBehalfOf] -= amount;
+        bool sucess = i_duckCoin.transferFrom(duckFrom, address(this), amount);
+        if (!sucess) {
+            revert DuckEngine_TransferFailed();
+        }
+        i_duckCoin.burn(amount);
     }
 
     function _getUserInformation(
         address user
-    ) internal view returns (uint256, uint256) {
+    ) private view returns (uint256, uint256) {
         return (s_duckCoinBalances[user], getCollateralValue(user));
     }
 
@@ -288,6 +344,17 @@ contract DuckEngine is ReentrancyGuard {
             uint256 duckCoinBalance,
             uint256 collateralValueInUSD
         ) = _getUserInformation(user);
+
+        return _calculateHealthFactor(duckCoinBalance, collateralValueInUSD);
+    }
+
+    function _calculateHealthFactor(
+        uint256 duckCoinBalance,
+        uint256 collateralValueInUSD
+    ) internal pure returns (uint256) {
+        if (duckCoinBalance == 0) {
+            return type(uint256).max;
+        }
         uint256 collateralAjustedForThreshold = (collateralValueInUSD *
             LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECITION;
         return
@@ -298,7 +365,7 @@ contract DuckEngine is ReentrancyGuard {
      * @notice follows CEI
      * @param user to check if the health factor is below the 1 otherwise revert
      */
-    function _revetIfHealthFactorBelowThreshold(address user) internal {
+    function _revetIfHealthFactorBelowThreshold(address user) internal view {
         uint256 healthFactor = getHealthFactor(user);
         if (healthFactor < MIN_HEALTH_FACTOR) {
             revert DuckEngine_BreaksHelthFactor(healthFactor);
@@ -339,34 +406,9 @@ contract DuckEngine is ReentrancyGuard {
         return totalCollateralValueInUSD;
     }
 
-    //////////////////////////////
-    /////  PRIVATE FUNCTIONS  /////
-    //////////////////////////////
-
-    function _redeemCollateral(
-        address token,
-        uint256 amount,
-        address from,
-        address to
-    ) private notZero(amount) isAllowedCollateral(token) {
-        s_user_collateralAssets[from][token] -= amount;
-        emit CollateralRedeemed(from, to, token, amount);
-        bool sucess = IERC20(token).transfer(to, amount);
-        if (!sucess) {
-            revert DuckEngine_FaildToTransferCollateral();
-        }
-    }
-
-    function _burnDuck(
-        uint256 amount,
-        address onBehalfOf,
-        address duckFrom
-    ) private notZero(amount) {
-        s_duckCoinBalances[onBehalfOf] -= amount;
-        bool sucess = i_duckCoin.transferFrom(duckFrom, address(this), amount);
-        if (!sucess) {
-            revert DuckEngine_TransferFailed();
-        }
-        i_duckCoin.burn(amount);
+    function getAccountInfoUser(
+        address user
+    ) public view returns (uint256 duckMinted, uint256 collateralValueUsd) {
+        (duckMinted, collateralValueUsd) = _getUserInformation(user);
     }
 }
