@@ -88,7 +88,7 @@ contract DuckEngine is ReentrancyGuard {
     uint256 private constant LIQUIDATION_THRESHOLD = 50;
     uint256 private constant LIQUIDATION_PRECITION = 100;
     uint256 private constant LIQUIDATION_BONUS = 10;
-    uint256 private constant MIN_HEALTH_FACTOR = 1;
+    uint256 private constant MIN_HEALTH_FACTOR = 1e18;
 
     DuckCoin private immutable i_duckCoin;
 
@@ -410,5 +410,16 @@ contract DuckEngine is ReentrancyGuard {
         address user
     ) public view returns (uint256 duckMinted, uint256 collateralValueUsd) {
         (duckMinted, collateralValueUsd) = _getUserInformation(user);
+    }
+
+    function getCollateralTokens() public view returns (address[] memory) {
+        return s_collateralAssets;
+    }
+
+    function getUserCollateralBalance(
+        address user,
+        address token
+    ) public view returns (uint256) {
+        return s_user_collateralAssets[user][token];
     }
 }

@@ -25,9 +25,13 @@ contract DuckEngineTest is Test {
     address public USERX = makeAddr("userx");
 
     uint256 public constant AMOUNT_MINT = 10 ether;
+    uint256 public constant AMOUNT_MINT_L = 20 ether;
+
     uint256 public constant AMOUNT_COLLATERAL = 10 ether;
     uint256 public constant AMOUNT_MINT_DUCK = 10000 ether;
-    int256 public constant ETH_USD_PRICE = 18e8;
+    uint256 public constant AMOUNT_MINT_DUCK_L = 15000 ether;
+
+    int256 public constant ETH_USD_PRICE = 1500e8;
 
     function setUp() public {
         deployer = new DeployDuck();
@@ -35,6 +39,7 @@ contract DuckEngineTest is Test {
         (ethUsdPriceFeed, wbtcUsdPriceFeed, weth, wbtc, ) = helperConfig
             .activeNetworkConfig();
         ERC20Mock(weth).mint(USER, AMOUNT_MINT);
+        ERC20Mock(weth).mint(USERX, AMOUNT_MINT_L);
     }
 
     modifier deposit() {
@@ -46,6 +51,28 @@ contract DuckEngineTest is Test {
             AMOUNT_MINT_DUCK
         );
         vm.stopPrank();
+        _;
+    }
+
+    modifier modi_liquidate() {
+        vm.startPrank(USER);
+        ERC20Mock(weth).approve(address(duckEngine), AMOUNT_MINT);
+        duckEngine.depositCollateralandMintDuckCoin(
+            weth,
+            AMOUNT_COLLATERAL,
+            AMOUNT_MINT_DUCK
+        );
+        vm.stopPrank();
+        MockV3Aggregator(ethUsdPriceFeed).updateAnswer(ETH_USD_PRICE);
+        vm.startPrank(USERX);
+        ERC20Mock(weth).approve(address(duckEngine), AMOUNT_MINT_L);
+        duckEngine.depositCollateralandMintDuckCoin(
+            weth,
+            AMOUNT_MINT_L,
+            AMOUNT_MINT_DUCK_L
+        );
+        vm.stopPrank();
+
         _;
     }
 
@@ -180,38 +207,44 @@ contract DuckEngineTest is Test {
     /////   liquidate       /////
     //////////////////////////////
 
-    function testLiquidate() public deposit {
-        uint256 heatlhx1 = duckEngine.getHealthFactor(USER);
-        console2.log("helath factor: ", heatlhx1);
-        (uint256 debt, uint256 collateral) = duckEngine.getAccountInfoUser(
-            USER
-        );
-
-        console2.log("Collateral: ", collateral);
-
-        MockV3Aggregator(ethUsdPriceFeed).updateAnswer(ETH_USD_PRICE);
-        uint256 heatlh = duckEngine.getHealthFactor(USER);
-        console2.log("helath factor: ", duckEngine.getHealthFactor(USER));
-        if (heatlh < 1) {
-            console2.log("Break: ", heatlh);
-        }
-
-        (, uint256 collateralx) = duckEngine.getAccountInfoUser(USER);
-        console2.log("Collateral: ", collateralx);
-
-        assertTrue(heatlhx1 != heatlh);
-
+    function testLiquidate() public modi_liquidate {
+        uint256 helth = duckEngine.getHealthFactor(USER);
         vm.startPrank(USERX);
-        ERC20Mock(weth).mint(USERX, AMOUNT_MINT);
+        duckCoin.approve(address(duckEngine), AMOUNT_MINT_DUCK_L);
+        duckEngine.liquidate(address(weth), USER, AMOUNT_MINT_DUCK);
+        vm.stopPrank();
+        uint256 helth2 = duckEngine.getHealthFactor(USER);
+        console2.log("helth", helth / 1e18);
+        console2.log("helth2", helth2 / 1e18);
+        assertEq(helth < helth2, true);
+    }
+
+    function testLiquidatex() public {
+        vm.startPrank(USER);
         ERC20Mock(weth).approve(address(duckEngine), AMOUNT_MINT);
         duckEngine.depositCollateralandMintDuckCoin(
             weth,
-            AMOUNT_MINT,
-            30 ether
+            AMOUNT_COLLATERAL,
+            AMOUNT_MINT_DUCK
         );
-        duckCoin.approve(address(duckEngine), 30 ether);
         vm.stopPrank();
-        duckEngine.liquidate(address(weth), USER, 30 ether);
-        console2.log("helath factor: ", duckEngine.getHealthFactor(USER));
+
+        vm.startPrank(USERX);
+        ERC20Mock(weth).approve(address(duckEngine), AMOUNT_MINT_L);
+        duckEngine.depositCollateralandMintDuckCoin(
+            weth,
+            AMOUNT_MINT_L,
+            AMOUNT_MINT_DUCK_L
+        );
+        uint256 helth = duckEngine.getHealthFactor(USER);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DuckEngine.DuckEngine_HelthFactorOk.selector,
+                helth
+            )
+        );
+        duckEngine.liquidate(address(weth), USER, AMOUNT_MINT_DUCK);
+
+        vm.stopPrank();
     }
 }
